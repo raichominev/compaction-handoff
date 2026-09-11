@@ -1,0 +1,38 @@
+{
+  "hooks": {
+    "PostToolBatch": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/compaction_recovery.py\" watch || python \"${CLAUDE_PLUGIN_ROOT}/scripts/compaction_recovery.py\" watch",
+            "timeout": 60
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/compaction_recovery.py\" precompact || python \"${CLAUDE_PLUGIN_ROOT}/scripts/compaction_recovery.py\" precompact",
+            "timeout": 120
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/compaction_recovery.py\" resume || python \"${CLAUDE_PLUGIN_ROOT}/scripts/compaction_recovery.py\" resume",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}

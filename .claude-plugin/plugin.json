@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "compaction-handoff",
+  "displayName": "Compaction Handoff",
+  "version": "1.0.0",
+  "description": "Carry a long Claude Code session across auto-compaction: the session writes a verified handoff before compaction, compaction waits for it, and the handoff's continuation prompt is pasted back into the context afterwards.",
+  "author": {
+    "name": "Raicho Minev",
+    "url": "https://github.com/raichominev"
+  },
+  "homepage": "https://github.com/raichominev/compaction-handoff",
+  "repository": "https://github.com/raichominev/compaction-handoff",
+  "license": "MIT",
+  "keywords": [
+    "compaction",
+    "context-management",
+    "session-handoff",
+    "hooks",
+    "agent-skills",
+    "developer-tools",
+    "claude-code"
+  ],
+  "dependencies": [
+    "deep-handoff"
+  ]
+}
