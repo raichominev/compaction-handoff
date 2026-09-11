@@ -2,17 +2,24 @@
 """Compaction recovery for Claude Code sessions (user-level hooks).
 
 watch       PostToolBatch. At (compaction point - handoff budget): write the cycle digest and ask
-            for the compaction handoff. With COMPACTION_FOCUS=1, also ask for a COMPACT-FOCUS
-            message close to the compaction point.
+            for the compaction handoff. After the handoff, ask for a refresh each time the context
+            grows one handoff budget past the last write of the marker. With COMPACTION_FOCUS=1,
+            also ask for a COMPACT-FOCUS message close to the compaction point.
 precompact  PreCompact. Record where auto-compaction fires. Hold a proactive auto-compaction while
             the handoff (or, with COMPACTION_FOCUS=1, the focus message) is missing, up to a
-            ceiling below the hard limit. Otherwise write the digest of the work since the handoff.
-resume      SessionStart (matcher "compact"). Point the model at the handoff and the digests.
+            ceiling below the hard limit. Otherwise write the digest of the work since the handoff,
+            and count the user messages in it.
+resume      SessionStart (matcher "compact"). Point the model at the handoff and the digests. Give a
+            warning when the user wrote messages after the handoff.
 simulate    Offline test: digest for the Nth compaction of a transcript vs. its summary.
 
 Timing adapts. The compaction point is the lowest recent first-PreCompact context of the model
 family (it resets when the configuration changes), else the configured window. The handoff budget
 is 1.2 x the 80th percentile of the project's recent handoff costs, else 100K.
+
+Every context number here is the sum of the usage fields of the last assistant message. It runs
+some thousand tokens below the preTokens value that Claude Code records for the same point (3K at
+737K, 22K at 978K in measured cases). Compare only numbers of this scale with each other.
 """
 import json
 import os
@@ -258,6 +265,16 @@ def iter_items(tail):
                     yield "tool", t, b
 
 
+def origin_kind(e):
+    origin = e.get("origin")
+    return origin.get("kind") if isinstance(origin, dict) else None
+
+
+def user_prompts(tail):
+    """The times of the messages that the user wrote. Notifications and command echoes have another origin."""
+    return [e.get("timestamp") or "" for e in tail if e.get("type") == "user" and origin_kind(e) == "human"]
+
+
 def count_file(block, edited, read):
     fp = (block.get("input") or {}).get("file_path")
     if fp:
@@ -333,7 +350,7 @@ def write_digest(hook, tag, since=None):
         tail, _ = cut_tail(chain, TAIL_TOKENS)
         scope, budget = f"the last ~{TAIL_TOKENS // 1000}K tokens", FINAL_BUDGET_CHARS
     if not tail:
-        return None
+        return None, []
     meta = dict(tag=tag, session=hook.get("session_id") or Path(transcript).stem, scope=scope, ctx=ctx,
                 written=datetime.now().strftime("%Y-%m-%d %H:%M:%S"), line=tail[0].get("_line"),
                 transcript=transcript)
@@ -341,7 +358,7 @@ def write_digest(hook, tag, since=None):
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"digest-{tag}-{datetime.now().strftime('%Y%m%d-%H%M%S-%f')[:-3]}.md"
     path.write_text(render(tail, meta, budget), encoding="utf-8")
-    return path
+    return path, tail
 
 
 # ---------- timing ----------
@@ -496,6 +513,19 @@ def handoff_request(ctx, model, cwd, out_dir, digest):
             "approaches, Open items, Verification log.")
 
 
+def refresh_request(ctx, state, out_dir):
+    handoff = handoff_file(out_dir) or str(out_dir / "handoff.md")
+    return (f"[compaction-handoff] Handoff refresh. The handoff {handoff} is from about "
+            f"{state['done_ctx'] // 1000}K tokens. The context is now about {ctx // 1000}K tokens. "
+            "Compaction did not run in this time. The handoff is thus older than the work. Update it now "
+            "for the work after that point. Rewrite the Resume section. Its four blocks are READ IN THIS "
+            "ORDER, WHERE THINGS STAND, DO NEXT and HARD RULES. Give the evidence for each status claim. "
+            "Add each new instruction and ruling of the user word for word. Update the state and the next "
+            "steps. Do not run the probes of the skill again. This work is still in your context, so you do "
+            f"not need a digest. Then write the handoff path into {marker_path(out_dir)} again. Then "
+            "continue the task.")
+
+
 def focus_request(ctx, model, out_dir):
     handoff = handoff_file(out_dir) or "the handoff file"
     return (f"[compaction-focus] The context is about {ctx // 1000}K tokens. Auto-compaction starts near "
@@ -531,8 +561,9 @@ def watch(hook):
     state = load_state(out_dir, ctx)
     if not state.get("handoff_asked"):
         if ctx >= handoff_point(model, hook.get("cwd")):
-            digest = write_digest(hook, "task")
-            state.update(handoff_asked=now_utc(), handoff_ctx=ctx, cycle=cycle_id(path))
+            digest, _ = write_digest(hook, "task")
+            state.update(handoff_asked=now_utc(), handoff_ctx=ctx, cycle=cycle_id(path),
+                         budget=handoff_budget(hook.get("cwd")))
             save_state(out_dir, state)
             inject(handoff_request(ctx, model, hook.get("cwd"), out_dir, digest))
         return
@@ -542,10 +573,20 @@ def watch(hook):
         log_cost(hook, state, ctx)
         state["cost_logged"] = True
         save_state(out_dir, state)
+    marker_at = utc_of_mtime(marker_path(out_dir))
+    if marker_at != state.get("marker_at"):  # the handoff was written or refreshed: the baseline moves
+        state.update(marker_at=marker_at, done_ctx=ctx)
+        save_state(out_dir, state)
     if FOCUS_ENABLED and not state.get("focus_asked") and ctx >= focus_point(model):
         state.update(focus_asked=now_utc(), focus_ctx=ctx)
         save_state(out_dir, state)
         inject(focus_request(ctx, model, out_dir))
+        return
+    budget = state.get("budget") or handoff_budget(hook.get("cwd"))
+    if ctx >= max(state.get("done_ctx") or ctx, state.get("refresh_ctx") or 0) + budget:
+        state["refresh_ctx"] = ctx
+        save_state(out_dir, state)
+        inject(refresh_request(ctx, state, out_dir))
 
 
 def should_block(state, out_dir, path, ctx, model):
@@ -580,7 +621,11 @@ def precompact(hook):
                               "reason": "compaction-recovery: the handoff or the COMPACT-FOCUS message is missing"}))
             return
     since = utc_of_mtime(marker_path(out_dir)) if handoff_done(out_dir, state) else None
-    write_digest(hook, "final", since)
+    digest, tail = write_digest(hook, "final", since)
+    if since and digest:
+        prompts = user_prompts(tail)
+        state.update(late_prompts=len(prompts), last_prompt_at=prompts[-1] if prompts else "")
+        save_state(out_dir, state)
 
 
 # The resume message pastes the handoff's Resume section (the continuation prompt). Hook output is capped
@@ -616,21 +661,40 @@ def continuation_prompt(handoff):
         return ""
 
 
+def short_time(ts):
+    return f"{ts[:10]} {ts[11:16]} UTC" if len(ts) >= 16 else ts
+
+
+def late_warning(state, since, final):
+    return (f"Warning: the user wrote {state['late_prompts']} message(s) after the handoff ({since}). The last "
+            f"one came at {short_time(state.get('last_prompt_at') or '')}. The final digest {final} holds these "
+            "messages word for word. The handoff is older than them. Where the handoff disagrees with these "
+            "messages, or with the final digest, the messages and the final digest win.")
+
+
 def resume(hook):
     out_dir = session_dir(hook)
     if hook.get("agent_id") or not out_dir.exists():
         return
-    current = handoff_done(out_dir, read_json(out_dir / "state.json"))
+    state = read_json(out_dir / "state.json")
+    current = handoff_done(out_dir, state)
     (out_dir / "state.json").unlink(missing_ok=True)  # the compaction ended the cycle
     handoff = handoff_file(out_dir)
     final, task = newest(out_dir, "digest-final-*.md"), newest(out_dir, "digest-task-*.md")
     if not (handoff or final):
         return
     prompt = continuation_prompt(handoff) if handoff and current else ""
+    late = state.get("late_prompts", 0) if current and final else 0
+    since = short_time(utc_of_mtime(marker_path(out_dir))) if late else ""
     lines = ["[compaction-recovery] Compaction ran. The summary above loses detail of the recent work."]
+    if late:
+        lines.append(late_warning(state, since, final))
     if prompt:
         lines += ["Before any other action, do the READ IN THIS ORDER list below completely, including every "
-                  "project document that it names. Then do the DO NEXT list.",
+                  "project document that it names. "
+                  + ("Then read the final digest. Then do the newest open request of the user. Use the DO NEXT "
+                     "list only where the final digest does not replace it." if late else "Then do the DO NEXT "
+                     "list."),
                   f"Continuation prompt, from the Resume section of the handoff {handoff}:", "<<<", prompt, ">>>"]
     elif handoff and current:
         lines.append(f"Before any other action, read the handoff {handoff}. Start with its Resume section and "
@@ -640,8 +704,14 @@ def resume(hook):
                      "earlier cycle and can be out of date. Use it for background only.")
     if final:
         lines.append(f"Read {final}. It holds the last part of the work before compaction, word for word.")
-    lines.append(("If the summary and the continuation prompt disagree, trust the prompt and the files. "
-                  if prompt else "If the summary and the files disagree, trust the files. ")
+    if late:
+        trust = (f"For the work after {since}, trust the final digest and the files. For older work, trust the "
+                 "handoff and the files. ")
+    elif prompt:
+        trust = "If the summary and the continuation prompt disagree, trust the prompt and the files. "
+    else:
+        trust = "If the summary and the files disagree, trust the files. "
+    lines.append(trust
                  + (f"The cycle digest {task} holds the cycle before the handoff. Read it only for a detail "
                     "that the handoff does not hold. " if task and current else "")
                  + f"For other details, search the transcript {hook.get('transcript_path', '')}. "

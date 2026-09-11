@@ -12,7 +12,7 @@ between the handoff and compaction.
 
 This skill writes the handoff before compaction. Hooks start the skill, hold compaction until the skill
 is complete, save the current run as a digest, and paste the handoff's continuation prompt into the
-context after compaction.
+context after compaction. A hook also asks for a refresh when the handoff becomes older than the work.
 
 The skill uses the probes of the `deep-handoff` skill. It applies them only to the work since the
 previous compaction (the "cycle"). `deep-handoff` stays the procedure for the end of a session.
@@ -22,6 +22,7 @@ previous compaction (the "cycle"). `deep-handoff` stays the procedure for the en
 | Message | When it comes | What to do |
 |---|---|---|
 | `[compaction-handoff]` | At the compaction point minus the handoff budget of the project | Do the procedure |
+| `[compaction-handoff] Handoff refresh` | When the context grows one handoff budget past the last handoff, and compaction did not run | Do the refresh procedure |
 | `[compaction-recovery]` | Directly after compaction | Do the recovery steps |
 | `[compaction-focus]` | Only when the environment variable `COMPACTION_FOCUS=1` is set. It is off by default. | Write the COMPACT-FOCUS message |
 
@@ -65,6 +66,22 @@ handoffs are recorded, the budget is 100K tokens.
 17. Continue the task.
 
 Do not commit or push. List the changed files in the handoff.
+
+## Refresh procedure
+
+A refresh request comes when the context grows one handoff budget past the last handoff, and
+compaction did not run. The handoff is then older than the work. A wrong estimate of the compaction
+point is the usual cause. The refresh is not a second full procedure. Do these steps only.
+
+1. Stop the task at a safe point. Make sure that no operation is half done (step 2 above).
+2. Rewrite the Resume section. Keep its four blocks: READ IN THIS ORDER, WHERE THINGS STAND, DO NEXT
+   and HARD RULES.
+3. Give the evidence for each status claim in that section (step 10 above).
+4. Add each new instruction and ruling of the user word for word, in the User instructions section.
+5. Update the State, Open items and Next steps sections.
+6. Do not run the probes again. The work since the last handoff is still in your context.
+7. Write the path of the handoff into the marker file again. The hook reads the time of that file.
+8. Continue the task.
 
 ## Where the handoff goes
 
@@ -122,10 +139,13 @@ message as one chat message that starts with `COMPACT-FOCUS`.
    context. Do its READ IN THIS ORDER list completely, including every project document that it names.
 2. Read the final digest that the hook message names. It holds the work after the handoff, word for
    word.
-3. Do the DO NEXT list. If the summary and the continuation prompt disagree, trust the prompt and the
-   files.
-4. For a detail that these files do not hold, read the cycle digest or search the transcript.
-5. Do not repeat finished steps. Do not start a verification probe unless DO NEXT asks for one.
+3. If the recovery message warns that the user wrote messages after the handoff, those messages and
+   the final digest win. Do the newest open request of the user. Use the DO NEXT list only where the
+   final digest does not replace it.
+4. If there is no such warning, do the DO NEXT list. If the summary and the continuation prompt
+   disagree, trust the prompt and the files.
+5. For a detail that these files do not hold, read the cycle digest or search the transcript.
+6. Do not repeat finished steps. Do not start a verification probe unless DO NEXT asks for one.
 
 After a manual `/compact`, the session waits for a prompt. A one-word prompt such as "resume" is
 enough.

@@ -17,12 +17,18 @@ Three hooks and one skill:
 | When | Hook | What it does |
 |---|---|---|
 | One handoff budget before compaction | `PostToolBatch` | Writes a digest of the cycle and asks the session to run the `compaction-handoff` skill |
+| One handoff budget after the last handoff, with no compaction between | `PostToolBatch` | Asks the session to refresh the handoff: a new continuation prompt, and the marker written again |
 | Auto-compaction starts | `PreCompact` | Holds a proactive auto-compaction until the handoff exists, up to a token ceiling. Then it writes a digest of the work after the handoff |
-| After compaction | `SessionStart` (`compact`) | Pastes the handoff's continuation prompt into the context |
+| After compaction | `SessionStart` (`compact`) | Pastes the handoff's continuation prompt into the context, and warns when the user wrote messages after the handoff |
 
 The timing adapts. The plugin records where auto-compaction starts for each model family, and what a
 handoff costs in each project. The handoff starts at the compaction point minus that cost: late enough
 to cover the work, early enough to finish.
+
+An estimate of the compaction point can be too low. An environment override, or a change of the
+configuration in a running session, moves the real point higher. The handoff then comes early, and the
+work after it grows. Two steps hold the loss down. The refresh request keeps the handoff current, and
+the recovery message names the user messages that came after the handoff.
 
 The `compaction-handoff` skill applies the probes of
 [deep-handoff](https://github.com/raichominev/session-handoff-skill) to the work since the last
