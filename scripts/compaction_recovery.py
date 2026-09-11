@@ -437,8 +437,10 @@ def block_ceiling(model):
 # ---------- session state ----------
 
 def load_state(out_dir, ctx):
+    """A context far below the last handoff means a compaction ran: forget the old cycle for good."""
     state = read_json(out_dir / "state.json")
     if state.get("handoff_ctx") and ctx < state["handoff_ctx"] // 2:
+        (out_dir / "state.json").unlink(missing_ok=True)
         return {}
     return state
 
@@ -618,24 +620,30 @@ def resume(hook):
     out_dir = session_dir(hook)
     if hook.get("agent_id") or not out_dir.exists():
         return
+    current = handoff_done(out_dir, read_json(out_dir / "state.json"))
+    (out_dir / "state.json").unlink(missing_ok=True)  # the compaction ended the cycle
     handoff = handoff_file(out_dir)
     final, task = newest(out_dir, "digest-final-*.md"), newest(out_dir, "digest-task-*.md")
     if not (handoff or final):
         return
-    prompt = continuation_prompt(handoff) if handoff else ""
+    prompt = continuation_prompt(handoff) if handoff and current else ""
     lines = ["[compaction-recovery] Compaction ran. The summary above loses detail of the recent work."]
     if prompt:
         lines += ["Before any other action, do the READ IN THIS ORDER list below completely, including every "
                   "project document that it names. Then do the DO NEXT list.",
                   f"Continuation prompt, from the Resume section of the handoff {handoff}:", "<<<", prompt, ">>>"]
-    elif handoff:
+    elif handoff and current:
         lines.append(f"Before any other action, read the handoff {handoff}. Start with its Resume section and "
                      "read every document that it names.")
+    elif handoff:
+        lines.append(f"No handoff was written before this compaction. The last handoff, {handoff}, is from an "
+                     "earlier cycle and can be out of date. Use it for background only.")
     if final:
-        lines.append(f"Also read {final}. It holds the work after the handoff, word for word.")
-    lines.append("If the summary and the continuation prompt disagree, trust the prompt and the files. "
+        lines.append(f"Read {final}. It holds the last part of the work before compaction, word for word.")
+    lines.append(("If the summary and the continuation prompt disagree, trust the prompt and the files. "
+                  if prompt else "If the summary and the files disagree, trust the files. ")
                  + (f"The cycle digest {task} holds the cycle before the handoff. Read it only for a detail "
-                    "that the handoff does not hold. " if task else "")
+                    "that the handoff does not hold. " if task and current else "")
                  + f"For other details, search the transcript {hook.get('transcript_path', '')}. "
                  "Do not repeat finished steps. Do not start a verification probe unless DO NEXT asks for one.")
     print("\n".join(lines))
