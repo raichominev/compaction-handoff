@@ -51,13 +51,12 @@ For each session, in `~/.claude/compaction/<session-id>/`:
 
 ## Install
 
-This plugin is in the **`raicho-skills`** marketplace. That marketplace keeps its manifest in the
-[concilium](https://github.com/raichominev/concilium) repository, so `concilium` is the repository you
-add. The plugin you then install is this one:
+This repository holds the **`raicho-handoffs`** marketplace, which carries this plugin and
+`deep-handoff`:
 
 ```
-/plugin marketplace add raichominev/concilium
-/plugin install compaction-handoff@raicho-skills
+/plugin marketplace add raichominev/compaction-handoff
+/plugin install compaction-handoff@raicho-handoffs
 ```
 
 The install also brings [deep-handoff](https://github.com/raichominev/session-handoff-skill), because

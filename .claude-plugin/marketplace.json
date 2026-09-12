@@ -1,0 +1,55 @@
+{
+  "name": "raicho-handoffs",
+  "description": "Claude Code plugins for session handoffs: a session-close handoff verified in rounds, and a handoff that carries a long session across auto-compaction.",
+  "owner": {
+    "name": "Raicho Minev",
+    "url": "https://github.com/raichominev"
+  },
+  "plugins": [
+    {
+      "name": "deep-handoff",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/raichominev/session-handoff-skill.git",
+        "path": "."
+      },
+      "description": "Write a session-close handoff that survives: a handoff document, durable facts wired into the project's own docs, scripts smoke-tested, and a paste-ready continuation prompt — then verified in rounds, changing the probe each round.",
+      "version": "1.0.1",
+      "author": {
+        "name": "Raicho Minev",
+        "url": "https://github.com/raichominev"
+      },
+      "license": "MIT",
+      "homepage": "https://github.com/raichominev/session-handoff-skill",
+      "repository": "https://github.com/raichominev/session-handoff-skill",
+      "keywords": [
+        "session-handoff",
+        "context-management",
+        "documentation",
+        "verification",
+        "agent-skills",
+        "prompt-engineering"
+      ]
+    },
+    {
+      "name": "compaction-handoff",
+      "source": "./",
+      "description": "Carry a long session across auto-compaction: the session writes a verified handoff before compaction, compaction waits for it, and the handoff's continuation prompt is pasted back into the context afterwards. Depends on deep-handoff.",
+      "version": "1.0.3",
+      "author": {
+        "name": "Raicho Minev",
+        "url": "https://github.com/raichominev"
+      },
+      "license": "MIT",
+      "homepage": "https://github.com/raichominev/compaction-handoff",
+      "repository": "https://github.com/raichominev/compaction-handoff",
+      "keywords": [
+        "compaction",
+        "context-management",
+        "session-handoff",
+        "hooks",
+        "agent-skills"
+      ]
+    }
+  ]
+}
