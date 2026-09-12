@@ -51,10 +51,17 @@ For each session, in `~/.claude/compaction/<session-id>/`:
 
 ## Install
 
+This plugin is in the **`raicho-skills`** marketplace. That marketplace keeps its manifest in the
+[concilium](https://github.com/raichominev/concilium) repository, so `concilium` is the repository you
+add. The plugin you then install is this one:
+
 ```
 /plugin marketplace add raichominev/concilium
 /plugin install compaction-handoff@raicho-skills
 ```
+
+The install also brings [deep-handoff](https://github.com/raichominev/session-handoff-skill), because
+this plugin declares it as a dependency.
 
 Python 3.8 or later must be on `PATH` as `python3` or `python`.
 
