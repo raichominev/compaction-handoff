@@ -227,6 +227,54 @@ class Baseline(Hooks):
         self.assertEqual(self.hook("watch", extra={"agent_id": "a1"}, **POINT), "")
 
 
+class CycleDigest(Hooks):
+    """The cycle digest holds the work after the newest compaction."""
+
+    def boundary(self, offset):
+        self.append({"type": "system", "subtype": "compact_boundary", "parentUuid": None, "timestamp": stamp(offset)})
+
+    def work(self, ruling, offset):
+        self.prompt(ruling, offset=offset)
+        for n in range(10):
+            self.assistant(100000 + n, offset=offset + n + 1)
+
+    def digest(self):
+        out = self.hook("watch", **POINT)
+        self.assertIn("[compaction-handoff]", out)
+        return next((self.out / "s1").glob("digest-task-*")).read_text(encoding="utf-8")
+
+    def test_a_queued_message_after_a_manual_compact_does_not_move_the_cycle(self):
+        # Claude Code 2.1.271 to 2.1.275: a queued message that arrives after a manual /compact gets a parent
+        # from before that compaction, and the older chain is written again at the end of the transcript.
+        self.boundary(-900)
+        self.work("old-ruling", -890)
+        older = self.transcript.read_text(encoding="utf-8").splitlines()
+        self.boundary(-700)
+        self.append({"type": "user", "isCompactSummary": True, "timestamp": stamp(-699),
+                     "message": {"role": "user", "content": "summary"}})
+        self.work("current-ruling", -690)
+        with open(self.transcript, "a", encoding="utf-8") as fh:
+            fh.write("\n".join(older) + "\n")
+        self.append({"type": "user", "origin": {"kind": "task-notification"}, "timestamp": stamp(-100),
+                     "parentUuid": json.loads(older[-1])["uuid"],
+                     "message": {"role": "user", "content": [{"type": "text", "text": "agent done"}]}})
+        self.assistant(636442, offset=-90)
+        digest = self.digest()
+        self.assertIn("current-ruling", digest)
+        self.assertNotIn("old-ruling", digest)
+
+    def test_an_abandoned_branch_stays_out_of_the_cycle_digest(self):
+        self.boundary(-900)
+        self.work("kept-ruling", -890)
+        fork = f"u{self.count}"
+        self.prompt("abandoned-ruling", offset=-800)
+        self.assistant(200000, offset=-799)
+        self.append(dict(reply(636442, -700), parentUuid=fork))  # the user went back to an earlier message
+        digest = self.digest()
+        self.assertIn("kept-ruling", digest)
+        self.assertNotIn("abandoned-ruling", digest)
+
+
 class Subagents(Hooks):
     """A subagent that compacts gets nothing from the hooks, and the parent's files stay as they were."""
 

@@ -115,7 +115,7 @@ Environment variables override the learned values:
 `python scripts/compaction_recovery.py simulate <transcript.jsonl> <n> <out.md>` builds the digest for
 the n-th compaction of a transcript and compares it with the summary that Claude Code wrote.
 
-`python scripts/test_compaction_recovery.py` runs the regression tests for the hooks: 17 tests, each
+`python scripts/test_compaction_recovery.py` runs the regression tests for the hooks: 19 tests, each
 starting the script the way Claude Code starts it, with the hook payload on stdin. The tests write
 their own transcripts, so they need no session data, and they need no test runner beyond the standard
 library.

@@ -152,12 +152,28 @@ def active_chain(entries, end_uuid=None):
     return chain
 
 
+def first_copies(entries):
+    """Each entry at its first place in the file. After a manual /compact, Claude Code (2.1.271 to 2.1.275)
+    records a queued message with a parent from before that compaction, and writes that older chain again
+    at the end of the file, with the same uuids and its older compact_boundary."""
+    seen, out = set(), []
+    for e in entries:
+        u = e.get("uuid")
+        if not (u and u in seen):
+            seen.add(u)
+            out.append(e)
+    return out
+
+
 def live_context(entries, end_uuid=None):
+    """The chain of the last entry when it starts at the newest compaction, else the main-session
+    entries after the newest compaction."""
     chain = active_chain(entries, end_uuid)
-    if len(chain) >= 10:
+    main = [e for e in first_copies(entries) if not e.get("isSidechain")]
+    last_b = max((i for i, e in enumerate(main) if is_boundary(e)), default=-1)
+    if len(chain) >= 10 and (end_uuid or last_b < 0 or chain[0].get("parentUuid") == main[last_b].get("uuid")):
         return chain
-    last_b = max((i for i, e in enumerate(entries) if is_boundary(e)), default=-1)
-    return [e for e in entries[last_b + 1:] if not e.get("isSidechain")]
+    return main[last_b + 1:]
 
 
 def message(e):
