@@ -22,10 +22,24 @@ POINT = dict(COMPACTION_POINT=723761, COMPACTION_HANDOFF_BUDGET=100000)
 HANDOFF = ("# Handoff\n\n## 1. Resume\n\nREAD IN THIS ORDER\n1. this file\n\nWHERE THINGS STAND\n"
            "state-sentinel\n\nDO NEXT\n1. do-the-thing\n\nHARD RULES\n- ask first\n\n"
            "## 2. Working set\nworking-set-sentinel\n")
+# Event fields as Claude Code 2.1.275 sends them. The tool hooks of a subagent also carry agent_id and
+# agent_type. The PreCompact and SessionStart of a subagent's compaction carry the same fields as those
+# of the main session: the parent's session_id and transcript_path, and no agent_id.
+PRE_COMPACT = {"trigger": "auto", "custom_instructions": None}
+SESSION_START = {"source": "compact", "model": "claude-opus-5", "session_title": "demo"}
+SUBAGENT = {"agent_id": "a9f73d99ab517e119", "agent_type": "general-purpose"}
 
 
 def stamp(offset=0):
     return (datetime.now(timezone.utc) + timedelta(seconds=offset)).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+
+def reply(ctx, offset=0):
+    return {"type": "assistant", "timestamp": stamp(offset),
+            "message": {"role": "assistant", "model": "claude-opus-5",
+                        "content": [{"type": "text", "text": "work"}],
+                        "usage": {"input_tokens": 1, "cache_read_input_tokens": ctx - 1,
+                                  "cache_creation_input_tokens": 0}}}
 
 
 class Hooks(unittest.TestCase):
@@ -50,11 +64,7 @@ class Hooks(unittest.TestCase):
             fh.write(json.dumps(entry) + "\n")
 
     def assistant(self, ctx, offset=0):
-        self.append({"type": "assistant", "timestamp": stamp(offset),
-                     "message": {"role": "assistant", "model": "claude-opus-5",
-                                 "content": [{"type": "text", "text": "work"}],
-                                 "usage": {"input_tokens": 1, "cache_read_input_tokens": ctx - 1,
-                                           "cache_creation_input_tokens": 0}}})
+        self.append(reply(ctx, offset))
 
     def prompt(self, text, kind="human", offset=5):
         self.append({"type": "user", "origin": {"kind": kind}, "timestamp": stamp(offset),
@@ -215,6 +225,85 @@ class Baseline(Hooks):
     def test_a_subagent_call_is_ignored(self):
         self.assistant(636442)
         self.assertEqual(self.hook("watch", extra={"agent_id": "a1"}, **POINT), "")
+
+
+class Subagents(Hooks):
+    """A subagent that compacts gets nothing from the hooks, and the parent's files stay as they were."""
+
+    def subagent(self, entry, name="agent-a9f73d99ab517e119"):
+        """Claude Code keeps a subagent transcript in <session>/subagents/."""
+        path = self.transcript.with_suffix("") / "subagents" / f"{name}.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(dict(entry, isSidechain=True)) + "\n")
+        return path
+
+    def left(self, pattern):
+        return list((self.out / "s1").glob(pattern))
+
+    def test_a_subagent_compaction_gets_no_continuation_prompt(self):
+        # 2026-09-22: a background subagent ran to the compaction point, and the recovery hook pasted
+        # the parent's DO NEXT list into it.
+        self.handoff_written()
+        state = self.state()
+        self.subagent(reply(956895))
+        self.assertEqual(self.hook("precompact", "PreCompact", PRE_COMPACT, **POINT), "")
+        self.assertEqual(self.hook("resume", "SessionStart", SESSION_START, **POINT), "")
+        self.assertEqual(self.state(), state)  # the parent's cycle goes on
+        self.assertEqual(self.left("digest-final-*"), [])
+        self.assertEqual(self.left("subagent-compaction-*"), [])  # the SessionStart used the record
+        self.assertFalse((self.out / "compaction-points.json").exists())  # no false compaction point
+        # The subagent works on with a small context. The parent's own compaction works as before.
+        self.subagent({"type": "system", "subtype": "compact_boundary", "timestamp": stamp()})
+        self.subagent(reply(72670))
+        self.assistant(700000, offset=9)
+        self.hook("precompact", "PreCompact", PRE_COMPACT, **POINT)
+        self.assertIn("state-sentinel", self.hook("resume", "SessionStart", SESSION_START, **POINT))
+
+    def test_a_subagent_compaction_is_not_held_for_the_parents_handoff(self):
+        self.assistant(636442)
+        self.assertIn("[compaction-handoff]", self.hook("watch", **POINT))  # the parent owes a handoff
+        self.subagent(reply(956895))
+        self.assertEqual(self.hook("precompact", "PreCompact", PRE_COMPACT, **POINT), "")
+        self.assertNotIn("first_precompact_ctx", self.state())
+
+    def test_a_main_compaction_beside_a_live_subagent_works_as_before(self):
+        self.handoff_written()
+        self.subagent(reply(400000))
+        self.assistant(700000, offset=9)
+        self.assertEqual(self.hook("precompact", "PreCompact", PRE_COMPACT, **POINT), "")
+        self.assertEqual(len(self.left("digest-final-*")), 1)
+        self.assertIn("state-sentinel", self.hook("resume", "SessionStart", SESSION_START, **POINT))
+
+    def test_a_manual_compaction_is_the_main_sessions(self):
+        self.handoff_written()
+        self.subagent(reply(900000))  # fuller than the main session, but only the main session takes /compact
+        self.assistant(700000, offset=9)
+        self.hook("precompact", "PreCompact", dict(PRE_COMPACT, trigger="manual"), **POINT)
+        self.assertEqual(len(self.left("digest-final-*")), 1)
+        self.assertIn("state-sentinel", self.hook("resume", "SessionStart", SESSION_START, **POINT))
+
+    def test_a_record_counts_only_while_the_subagent_compacts(self):
+        self.handoff_written()
+        self.subagent(reply(956895))
+        self.hook("precompact", "PreCompact", PRE_COMPACT, **POINT)
+        self.assertEqual(len(self.left("subagent-compaction-*")), 1)
+        self.subagent(reply(958000))  # no compaction followed: the subagent works on
+        self.hook("precompact", "PreCompact", dict(PRE_COMPACT, trigger="manual"), **POINT)
+        self.assertIn("state-sentinel", self.hook("resume", "SessionStart", SESSION_START, **POINT))
+        self.assertEqual(self.left("subagent-compaction-*"), [])
+
+    def test_a_payload_that_names_a_subagent_is_ignored(self):
+        self.handoff_written()
+        state = self.state()
+        self.assertEqual(self.hook("watch", extra=SUBAGENT, **POINT), "")
+        self.assertEqual(self.hook("precompact", "PreCompact", dict(PRE_COMPACT, **SUBAGENT), **POINT), "")
+        self.assertEqual(self.hook("resume", "SessionStart", dict(SESSION_START, **SUBAGENT), **POINT), "")
+        inside = {"transcript_path": str(self.subagent(reply(956895)))}
+        self.assertEqual(self.hook("precompact", "PreCompact", dict(PRE_COMPACT, **inside), **POINT), "")
+        self.assertEqual(self.hook("resume", "SessionStart", dict(SESSION_START, **inside), **POINT), "")
+        self.assertEqual(self.state(), state)
+        self.assertEqual(self.left("digest-final-*"), [])
 
 
 if __name__ == "__main__":

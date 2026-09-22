@@ -49,6 +49,22 @@ For each session, in `~/.claude/compaction/<session-id>/`:
 
 `~/.claude/compaction/compaction-points.json` and `handoff-costs.jsonl` hold the learned timing.
 
+## Subagents
+
+A subagent can run long enough to compact. The hooks then do nothing: no handoff request, no digest
+and no continuation prompt. Claude Code gives the tool hooks of a subagent an `agent_id` field, and
+the plugin uses it.
+
+Claude Code 2.1.275 sends the `PreCompact` and `SessionStart` hooks of a subagent's compaction
+without `agent_id`. These two hooks get the session and the transcript of the parent session. For
+them, the plugin compares the transcripts. Auto-compaction starts when a context reaches the
+compaction point. Thus, if a subagent transcript that changed in the last minute is fuller than the
+parent's transcript, the compaction belongs to that subagent.
+
+`PreCompact` then writes a record file into the session folder. The `SessionStart` hook at the end of
+that compaction deletes the record and does nothing else. A manual `/compact` always belongs to the
+parent session.
+
 ## Install
 
 This repository holds the **`raicho-handoffs`** marketplace, which carries this plugin and
@@ -89,13 +105,17 @@ Environment variables override the learned values:
   continues without one.
 - The plugin never holds a manual `/compact`, and never holds a compaction at the context limit.
 - Hook output is capped at 10,000 characters, so the pasted continuation prompt is capped at 7,000.
+- The transcript comparison for subagents can fail in two rare cases. In one, the parent session and
+  a subagent compact at the same time. In the other, a subagent is close to its own compaction point
+  when the parent session compacts. Then the parent session loses its continuation prompt, or the
+  subagent gets it.
 
 ## Notes
 
 `python scripts/compaction_recovery.py simulate <transcript.jsonl> <n> <out.md>` builds the digest for
 the n-th compaction of a transcript and compares it with the summary that Claude Code wrote.
 
-`python scripts/test_compaction_recovery.py` runs the regression tests for the hooks: 11 tests, each
+`python scripts/test_compaction_recovery.py` runs the regression tests for the hooks: 17 tests, each
 starting the script the way Claude Code starts it, with the hook payload on stdin. The tests write
 their own transcripts, so they need no session data, and they need no test runner beyond the standard
 library.

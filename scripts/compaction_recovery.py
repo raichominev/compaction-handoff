@@ -13,6 +13,13 @@ resume      SessionStart (matcher "compact"). Point the model at the handoff and
             warning when the user wrote messages after the handoff.
 simulate    Offline test: digest for the Nth compaction of a transcript vs. its summary.
 
+In a subagent, every hook does nothing. Claude Code gives the tool hooks of a subagent an agent_id, but
+it sends the PreCompact and SessionStart of a subagent's compaction with the parent's session_id and
+transcript_path and without agent_id (seen in 2.1.275). precompact therefore also compares the
+transcripts: an auto-compaction starts when a context reaches the compaction point, so a subagent
+transcript written in the last minute that is fuller than the parent's marks the compaction as the
+subagent's. precompact records it, and resume skips the SessionStart that ends it.
+
 Timing adapts. The compaction point is the lowest recent first-PreCompact context of the model
 family (it resets when the configuration changes), else the configured window. The handoff budget
 is 1.2 x the 80th percentile of the project's recent handoff costs, else 100K.
@@ -25,6 +32,7 @@ import json
 import os
 import re
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -42,6 +50,8 @@ BUDGET_RANGE = (40_000, 200_000)
 FOCUS_LEAD = 15_000
 FOCUS_GRACE = 50_000
 HARD_MARGIN = 25_000
+LIVE_SECONDS = 60
+RECORD_SECONDS = 900
 KEY_ARGS = ("file_path", "notebook_path", "path", "command", "pattern", "url", "query",
             "skill", "description", "prompt")
 EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
@@ -542,11 +552,78 @@ def inject(text):
                      ensure_ascii=False))
 
 
+# ---------- subagents ----------
+
+def in_subagent(hook):
+    return bool(hook.get("agent_id")) or "subagents" in Path(hook.get("transcript_path") or "").parts
+
+
+def fill(path):
+    """The used share of the context window at the end of a transcript. A compaction resets it to 0."""
+    for chunk in (1_000_000, 8_000_000):
+        try:
+            lines = tail_lines(path, chunk)
+        except OSError:  # the transcript is gone
+            return 0
+        for line in reversed(lines):
+            if '"usage"' not in line and '"compact_boundary"' not in line:
+                continue
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            if is_boundary(e):
+                return 0
+            if ctx_tokens(e):
+                return ctx_tokens(e) / window_for(message(e).get("model"))
+    return 0
+
+
+def age(path):
+    try:
+        return time.time() - path.stat().st_mtime
+    except OSError:  # the transcript is gone
+        return float("inf")
+
+
+def compacting_subagent(path):
+    """The subagent transcript, written in the last minute, that is fuller than the main one."""
+    main = Path(path)
+    fills = {p: fill(p) for p in main.with_suffix("").joinpath("subagents").rglob("agent-*.jsonl")
+             if age(p) < LIVE_SECONDS}
+    agent = max(fills, key=fills.get, default=None)
+    return agent if agent and fills[agent] > fill(main) else None
+
+
+def note_subagent_compaction(path, out_dir):
+    agent = compacting_subagent(path)
+    if agent:
+        write_json(out_dir / f"subagent-compaction-{agent.stem}.json",
+                   {"transcript": str(agent), "fill": fill(agent)})
+    return bool(agent)
+
+
+def claim_subagent_compaction(out_dir):
+    """A record counts while the subagent's context is unchanged, that is, while its compaction runs.
+    Only the hook that deletes a record uses it, so one record skips one SessionStart."""
+    for record in out_dir.glob("subagent-compaction-*.json"):
+        try:
+            age = time.time() - record.stat().st_mtime
+            data = read_json(record)
+            record.unlink()
+        except OSError:  # another hook took the record first
+            continue
+        agent = Path(data.get("transcript") or "")
+        if age < RECORD_SECONDS and agent.is_file() and fill(agent) == data.get("fill"):
+            return True
+    return False
+
+
 # ---------- hook entry points ----------
 
 def usable(hook):
     path = hook.get("transcript_path")
-    return not hook.get("agent_id") and path and Path(path).exists()
+    return not in_subagent(hook) and path and Path(path).exists()
 
 
 def watch(hook):
@@ -606,6 +683,8 @@ def precompact(hook):
         return
     path = hook["transcript_path"]
     out_dir = session_dir(hook)
+    if hook.get("trigger") == "auto" and note_subagent_compaction(path, out_dir):
+        return
     ctx, model = last_usage(path)
     cycle = cycle_id(path)
     state = read_json(out_dir / "state.json")
@@ -674,7 +753,7 @@ def late_warning(state, since, final):
 
 def resume(hook):
     out_dir = session_dir(hook)
-    if hook.get("agent_id") or not out_dir.exists():
+    if in_subagent(hook) or not out_dir.exists() or claim_subagent_compaction(out_dir):
         return
     state = read_json(out_dir / "state.json")
     current = handoff_done(out_dir, state)
