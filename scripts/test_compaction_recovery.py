@@ -243,9 +243,9 @@ class CycleDigest(Hooks):
         self.assertIn("[compaction-handoff]", out)
         return next((self.out / "s1").glob("digest-task-*")).read_text(encoding="utf-8")
 
-    def test_a_queued_message_after_a_manual_compact_does_not_move_the_cycle(self):
-        # Claude Code 2.1.271 to 2.1.275: a queued message that arrives after a manual /compact gets a parent
-        # from before that compaction, and the older chain is written again at the end of the transcript.
+    def test_a_replayed_history_does_not_move_the_cycle(self):
+        # Claude Code 2.1.271 to 2.1.275: after a compaction of the main thread, a subagent's compaction makes
+        # the next message write the older history again and take its parent from that copy (#92089).
         self.boundary(-900)
         self.work("old-ruling", -890)
         older = self.transcript.read_text(encoding="utf-8").splitlines()

@@ -153,9 +153,10 @@ def active_chain(entries, end_uuid=None):
 
 
 def first_copies(entries):
-    """Each entry at its first place in the file. After a manual /compact, Claude Code (2.1.271 to 2.1.275)
-    records a queued message with a parent from before that compaction, and writes that older chain again
-    at the end of the file, with the same uuids and its older compact_boundary."""
+    """Each entry at its first place in the file. After a compaction of the main thread, a subagent's
+    compaction in the same process makes Claude Code (2.1.271 to 2.1.275) write the older history again at
+    the end of the file, with the same uuids and its older compact_boundary, and parent the next message
+    on that copy (anthropics/claude-code#92089)."""
     seen, out = set(), []
     for e in entries:
         u = e.get("uuid")
